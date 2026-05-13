@@ -7,6 +7,8 @@ from datetime import datetime
 import streamlit as st
 import pandas as pd
 import numpy as np
+import sys
+import pickle
 from sklearn.model_selection import train_test_split, KFold, StratifiedKFold
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
@@ -22,10 +24,16 @@ from sklearn.metrics import (
 )
 from sklearn.inspection import permutation_importance
 
+# ensure local module imports work when pytest changes CWD
+sys.path.insert(0, os.path.dirname(__file__))
 from ui_components import render_info_panel, fix_arrow_compatibility, add_plot_to_session
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.dummy import DummyClassifier, DummyRegressor
+
+# Temporary safety flag: when True, skip writing model bundles and evaluation plots to disk
+# to avoid repository bloat. Set to False to re-enable saving.
+DISABLE_BUNDLE_SAVING = True
 
 
 # Simple model registry + defaults for the UI
@@ -761,85 +769,134 @@ def render_modeling():
     bundle_name = st.text_input("Model name (file will be created under models/)", value=f"model_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}")
     if st.button("Save Model Bundle"):
         try:
-            models_dir = os.path.join(os.path.dirname(__file__), "models")
-            os.makedirs(models_dir, exist_ok=True)
-            if "trained_model" not in st.session_state or st.session_state.get("trained_model") is None:
-                st.error("No trained model in session. Train a model first.")
+            if DISABLE_BUNDLE_SAVING:
+                st.warning(
+                    "Saving model bundles is temporarily disabled to avoid repository bloat. "
+                    "No files will be written to /models. To re-enable, set DISABLE_BUNDLE_SAVING=False in data_modeling.py."
+                )
+                st.session_state["last_saved_bundle"] = None
             else:
-                model_obj = st.session_state.get("trained_model")
-                preproc_obj = st.session_state.get("trained_preprocessor")
-                # determine selected features for metadata (respect train UI)
-                if st.session_state.get("train_features_mode") == "Select Features":
-                    sel_feats_meta = st.session_state.get("train_selected_features", []) or []
+                models_dir = os.path.join(os.path.dirname(__file__), "models")
+                os.makedirs(models_dir, exist_ok=True)
+                if "trained_model" not in st.session_state or st.session_state.get("trained_model") is None:
+                    st.error("No trained model in session. Train a model first.")
                 else:
-                    sel_feats_meta = list(st.session_state.get("pre_X_train").columns) if st.session_state.get("pre_X_train") is not None else []
+                    model_obj = st.session_state.get("trained_model")
+                    preproc_obj = st.session_state.get("trained_preprocessor")
+                    # determine selected features for metadata (respect train UI)
+                    if st.session_state.get("train_features_mode") == "Select Features":
+                        sel_feats_meta = st.session_state.get("train_selected_features", []) or []
+                    else:
+                        sel_feats_meta = list(st.session_state.get("pre_X_train").columns) if st.session_state.get("pre_X_train") is not None else []
 
-                metadata = {
-                    "model_name": bundle_name,
-                    "saved_at": datetime.utcnow().isoformat(),
-                    "random_seed": int(st.session_state.get("global_seed", 42)),
-                    "task_type": st.session_state.get("task_type"),
-                    "target_column": st.session_state.get("target_column"),
-                    "preprocessing_steps": st.session_state.get("preprocessing_steps", []),
-                    "cleansing_steps": st.session_state.get("cleansing_steps", []),
-                    "selected_features": sel_feats_meta,
-                    "hyperparameters": user_params,
-                    "validation_summary": st.session_state.get("validation_summary"),
-                    "evaluation_summary": st.session_state.get("training_evaluation_summary"),
-                }
+                    metadata = {
+                        "model_name": bundle_name,
+                        "saved_at": datetime.utcnow().isoformat(),
+                        "random_seed": int(st.session_state.get("global_seed", 42)),
+                        "task_type": st.session_state.get("task_type"),
+                        "target_column": st.session_state.get("target_column"),
+                        "preprocessing_steps": st.session_state.get("preprocessing_steps", []),
+                        "cleansing_steps": st.session_state.get("cleansing_steps", []),
+                        "selected_features": sel_feats_meta,
+                        "hyperparameters": user_params,
+                        "validation_summary": st.session_state.get("validation_summary"),
+                        "evaluation_summary": st.session_state.get("training_evaluation_summary"),
+                    }
 
-                bundle = {"model": model_obj, "preprocessor": preproc_obj, "metadata": metadata}
-                bundle_path = os.path.join(models_dir, f"{bundle_name}.pkl")
-                joblib.dump(bundle, bundle_path)
+                    bundle = {"model": model_obj, "preprocessor": preproc_obj, "metadata": metadata}
+                    bundle_path = os.path.join(models_dir, f"{bundle_name}.pkl")
+                    joblib.dump(bundle, bundle_path)
 
-                # save simple metadata file
-                meta_path = os.path.join(models_dir, f"{bundle_name}_metadata.txt")
-                with open(meta_path, "w", encoding="utf-8") as f:
-                    for k, v in metadata.items():
-                        f.write(f"{k}: {v}\n")
+                    # save simple metadata file
+                    meta_path = os.path.join(models_dir, f"{bundle_name}_metadata.txt")
+                    with open(meta_path, "w", encoding="utf-8") as f:
+                        for k, v in metadata.items():
+                            f.write(f"{k}: {v}\n")
 
-                # Save any registered evaluation plots into models/evaluation_plots/<bundle_name>/
-                try:
-                    eval_plots = st.session_state.get("evaluation_plots_temp", {})
-                    eval_meta = st.session_state.get("evaluation_plots_meta", {})
-                    if eval_plots:
-                        eval_root = os.path.join(models_dir, "evaluation_plots")
-                        os.makedirs(eval_root, exist_ok=True)
-                        eval_dir = os.path.join(eval_root, bundle_name)
-                        os.makedirs(eval_dir, exist_ok=True)
-                        for fname, data in eval_plots.items():
-                            meta = eval_meta.get(fname, {})
-                            created_at = meta.get("created_at") or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                            page = meta.get("page", "")
-                            kind = meta.get("kind", "plot")
-                            title = (meta.get("title") or fname).replace(" ", "_")
+                    # Save any registered evaluation plots into models/evaluation_plots/<bundle_name>/
+                    try:
+                        eval_plots = st.session_state.get("evaluation_plots_temp", {})
+                        eval_meta = st.session_state.get("evaluation_plots_meta", {})
+                        if eval_plots:
+                            eval_root = os.path.join(models_dir, "evaluation_plots")
+                            os.makedirs(eval_root, exist_ok=True)
+                            eval_dir = os.path.join(eval_root, bundle_name)
+                            os.makedirs(eval_dir, exist_ok=True)
+                            for fname, data in eval_plots.items():
+                                meta = eval_meta.get(fname, {})
+                                created_at = meta.get("created_at") or datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                                page = meta.get("page", "")
+                                kind = meta.get("kind", "plot")
+                                title = (meta.get("title") or fname).replace(" ", "_")
 
-                            if kind == "confusion_matrix" and page in ("Validation", "Training"):
-                                desired_name = f"{bundle_name}_{created_at}_confusion_matrix.png"
-                            else:
-                                desired_name = f"{created_at}_{title}.png"
+                                if kind == "confusion_matrix" and page in ("Validation", "Training"):
+                                    desired_name = f"{bundle_name}_{created_at}_confusion_matrix.png"
+                                else:
+                                    desired_name = f"{created_at}_{title}.png"
 
-                            # sanitize filename
-                            desired_name = desired_name.replace(":", "_").replace("/", "_").replace("\\\\", "_")
+                                # sanitize filename
+                                desired_name = desired_name.replace(":", "_").replace("/", "_").replace("\\\\", "_")
 
-                            out_path = os.path.join(eval_dir, desired_name)
-                            # avoid overwriting; append counter if exists
-                            base, ext = os.path.splitext(out_path)
-                            counter = 1
-                            while os.path.exists(out_path):
-                                out_path = f"{base}_{counter}{ext}"
-                                counter += 1
+                                out_path = os.path.join(eval_dir, desired_name)
+                                # avoid overwriting; append counter if exists
+                                base, ext = os.path.splitext(out_path)
+                                counter = 1
+                                while os.path.exists(out_path):
+                                    out_path = f"{base}_{counter}{ext}"
+                                    counter += 1
 
-                            with open(out_path, "wb") as pf:
-                                pf.write(data)
-                except Exception:
-                    # non-fatal if saving plots fails
-                    pass
-                st.session_state["last_saved_bundle"] = bundle_path
-                st.success(f"Saved model bundle to {bundle_path}")
+                                with open(out_path, "wb") as pf:
+                                    pf.write(data)
+                    except Exception:
+                        # non-fatal if saving plots fails
+                        pass
+                    st.session_state["last_saved_bundle"] = bundle_path
+                    st.success(f"Saved model bundle to {bundle_path}")
 
         except Exception as e:
             st.error(f"Error saving bundle: {e}")
+
+    # --- Export bundle for upload (download .pkl) ---
+    st.markdown("---")
+    st.subheader("Export Model Bundle (.pkl) for Submission")
+    export_filename = st.text_input("Export filename", value=f"{bundle_name}.pkl", key="export_filename")
+    if st.session_state.get("trained_model") is None:
+        st.info("No trained model available to export. Train a model first.")
+    else:
+        try:
+            # build export metadata similar to save flow
+            if st.session_state.get("train_features_mode") == "Select Features":
+                sel_feats_meta = st.session_state.get("train_selected_features", []) or []
+            else:
+                sel_feats_meta = list(st.session_state.get("pre_X_train").columns) if st.session_state.get("pre_X_train") is not None else []
+
+            metadata_export = {
+                "model_name": bundle_name,
+                "saved_at": datetime.utcnow().isoformat(),
+                "random_seed": int(st.session_state.get("global_seed", 42)),
+                "task_type": st.session_state.get("task_type"),
+                "target_column": st.session_state.get("target_column"),
+                "preprocessing_steps": st.session_state.get("preprocessing_steps", []),
+                "cleansing_steps": st.session_state.get("cleansing_steps", []),
+                "selected_features": sel_feats_meta,
+                "hyperparameters": user_params,
+                "validation_summary": st.session_state.get("validation_summary"),
+                "evaluation_summary": st.session_state.get("training_evaluation_summary"),
+            }
+
+            bundle_export = {
+                "model": st.session_state.get("trained_model"),
+                "preprocessor": st.session_state.get("trained_preprocessor"),
+                "metadata": metadata_export,
+            }
+
+            try:
+                pkl_bytes = pickle.dumps(bundle_export, protocol=pickle.HIGHEST_PROTOCOL)
+                st.download_button("Download model bundle (.pkl)", data=pkl_bytes, file_name=export_filename or f"{bundle_name}.pkl", mime="application/octet-stream", key="download_export_bundle")
+            except Exception as e:
+                st.error(f"Error preparing export bundle: {e}")
+        except Exception as e:
+            st.error(f"Error preparing export UI: {e}")
 
     render_info_panel("Training", current_model_name=model_name, current_hyperparams=DEFAULT_HYPERPARAMETERS.get(model_name, {}), model_list=models)
 

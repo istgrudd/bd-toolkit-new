@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler, MinMaxScaler, RobustScaler, OneHotEncoder, OrdinalEncoder, LabelEncoder
 import math
 
+import inspect
 from ui_components import render_info_panel, fix_arrow_compatibility, annotate_bar_values
 from sampling import render_sampling
 from resampling import render_resampling
@@ -63,7 +64,9 @@ def render_preprocessing():
             y_preview = st.session_state.get("pre_y_test")
     else:
         # when no split, preview the working master or the working X
-        df_preview = st.session_state.get("pre_X_train") or st.session_state.get("df")
+        pre_x = st.session_state.get("pre_X_train")
+        df_master = st.session_state.get("df")
+        df_preview = pre_x if pre_x is not None else df_master
 
     if df_preview is None:
         st.info("No data available for preview.")
@@ -176,8 +179,10 @@ def render_preprocessing():
                                             px = st.session_state.get("pre_X_test")
                                             px.loc[:, sel_cols_scaling] = fitted.transform(px[sel_cols_scaling])
                                             st.session_state["pre_X_test"] = px
-                                else:
-                                    X_local = st.session_state.get("pre_X_train") or st.session_state.get("df")
+                                    else:
+                                        pre_x_local = st.session_state.get("pre_X_train")
+                                        df_master_local = st.session_state.get("df")
+                                        X_local = pre_x_local if pre_x_local is not None else df_master_local
                                     X_local.loc[:, sel_cols_scaling] = fitted.transform(X_local[sel_cols_scaling])
                                     st.session_state["pre_X_train"] = X_local
                                 _record_preprocessing_step({"type": "scaling", "method": scaler_name, "columns": sorted(sel_cols_scaling), "action": action_scale, "target_data": scaling_subsets})
@@ -397,32 +402,44 @@ def render_preprocessing():
 
                 elif encoder_name == "OneHotEncoder":
                     try:
-                        # if user selected a previously fitted encoder key, use it
+                        # If a fitted encoder key was chosen, apply it; otherwise instantiate and fit
                         if chosen_transformer_key and chosen_transformer_key in st.session_state.get("encoders", {}):
                             ohe = st.session_state.get("encoders", {}).get(chosen_transformer_key)
                             if ohe is None:
                                 st.error(f"Chosen OneHotEncoder '{chosen_transformer_key}' not found in session encoders.")
                             else:
-                                names = ohe.get_feature_names_out(cols_sorted)
+                                # determine feature names safely
+                                try:
+                                    names = ohe.get_feature_names_out(cols_sorted)
+                                except Exception:
+                                    try:
+                                        names = ohe.get_feature_names(cols_sorted)
+                                    except Exception:
+                                        names = [f"ohe_{i}" for i in range(len(cols_sorted))]
+
                                 if st.session_state.get("split_done"):
-                                    # apply to Train
                                     px = st.session_state.get("pre_X_train")
                                     if px is not None:
                                         arr = ohe.transform(px[cols_sorted])
+                                        if hasattr(arr, "toarray"):
+                                            arr = arr.toarray()
                                         df_ohe = pd.DataFrame(arr, columns=names, index=px.index)
                                         px = px.drop(columns=cols_sorted)
                                         px = pd.concat([px, df_ohe], axis=1)
                                         st.session_state["pre_X_train"] = px
-                                    # apply to Test if available
                                     px_test = st.session_state.get("pre_X_test")
                                     if px_test is not None:
                                         arr_t = ohe.transform(px_test[cols_sorted])
+                                        if hasattr(arr_t, "toarray"):
+                                            arr_t = arr_t.toarray()
                                         df_ohe_t = pd.DataFrame(arr_t, columns=names, index=px_test.index)
                                         px_test = px_test.drop(columns=cols_sorted)
                                         px_test = pd.concat([px_test, df_ohe_t], axis=1)
                                         st.session_state["pre_X_test"] = px_test
                                 else:
                                     arr = ohe.transform(X[cols_sorted])
+                                    if hasattr(arr, "toarray"):
+                                        arr = arr.toarray()
                                     df_ohe = pd.DataFrame(arr, columns=names, index=X.index)
                                     X = X.drop(columns=cols_sorted)
                                     X = pd.concat([X, df_ohe], axis=1)
@@ -437,12 +454,31 @@ def render_preprocessing():
                                 })
                                 st.success(f"Transformed columns {cols_sorted} with existing OneHotEncoder for subsets: {encoding_subsets}")
                         else:
-                            ohe = OneHotEncoder(sparse=False, handle_unknown='ignore')
+                            # instantiate OneHotEncoder compatibly across sklearn versions
+                            def _make_onehot_encoder(handle_unknown="ignore", dense=True):
+                                params = inspect.signature(OneHotEncoder).parameters
+                                kwargs = {"handle_unknown": handle_unknown}
+                                if "sparse_output" in params:
+                                    kwargs["sparse_output"] = False if dense else True
+                                elif "sparse" in params:
+                                    kwargs["sparse"] = False if dense else True
+                                return OneHotEncoder(**kwargs)
+
+                            ohe = _make_onehot_encoder(handle_unknown="ignore", dense=True)
+
                             if st.session_state.get("split_done"):
                                 px = st.session_state.get("pre_X_train")
                                 if px is not None:
                                     arr = ohe.fit_transform(px[cols_sorted])
-                                    names = ohe.get_feature_names_out(cols_sorted)
+                                    if hasattr(arr, "toarray"):
+                                        arr = arr.toarray()
+                                    try:
+                                        names = ohe.get_feature_names_out(cols_sorted)
+                                    except Exception:
+                                        try:
+                                            names = ohe.get_feature_names(cols_sorted)
+                                        except Exception:
+                                            names = [f"ohe_{i}" for i in range(arr.shape[1])]
                                     df_ohe = pd.DataFrame(arr, columns=names, index=px.index)
                                     px = px.drop(columns=cols_sorted)
                                     px = pd.concat([px, df_ohe], axis=1)
@@ -451,14 +487,30 @@ def render_preprocessing():
                                 if "Test" in encoding_subsets and st.session_state.get("pre_X_test") is not None:
                                     px_test = st.session_state.get("pre_X_test")
                                     arr_t = ohe.transform(px_test[cols_sorted])
-                                    names = ohe.get_feature_names_out(cols_sorted)
+                                    if hasattr(arr_t, "toarray"):
+                                        arr_t = arr_t.toarray()
+                                    try:
+                                        names = ohe.get_feature_names_out(cols_sorted)
+                                    except Exception:
+                                        try:
+                                            names = ohe.get_feature_names(cols_sorted)
+                                        except Exception:
+                                            names = [f"ohe_{i}" for i in range(arr_t.shape[1])]
                                     df_ohe_t = pd.DataFrame(arr_t, columns=names, index=px_test.index)
                                     px_test = px_test.drop(columns=cols_sorted)
                                     px_test = pd.concat([px_test, df_ohe_t], axis=1)
                                     st.session_state["pre_X_test"] = px_test
                             else:
                                 arr = ohe.fit_transform(X[cols_sorted])
-                                names = ohe.get_feature_names_out(cols_sorted)
+                                if hasattr(arr, "toarray"):
+                                    arr = arr.toarray()
+                                try:
+                                    names = ohe.get_feature_names_out(cols_sorted)
+                                except Exception:
+                                    try:
+                                        names = ohe.get_feature_names(cols_sorted)
+                                    except Exception:
+                                        names = [f"ohe_{i}" for i in range(arr.shape[1])]
                                 df_ohe = pd.DataFrame(arr, columns=names, index=X.index)
                                 X = X.drop(columns=cols_sorted)
                                 X = pd.concat([X, df_ohe], axis=1)
@@ -473,7 +525,6 @@ def render_preprocessing():
                                 "target_data": encoding_subsets,
                             })
                             st.success(f"Applied OneHotEncoder to {cols_sorted} for subsets: {encoding_subsets}")
-
                     except Exception as e:
                         st.error(f"OneHotEncoder error: {e}")
 

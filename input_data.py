@@ -4,33 +4,35 @@ import numpy as np
 import io
 import hashlib
 from ui_components import render_info_panel, fix_arrow_compatibility
+from config_limits import MAX_COLUMNS, MAX_ROWS, TRAIN_CSV_LIMIT, validate_dataframe_shape, validate_upload_size
+from state_manager import clear_all_workflow_state
 
 
-def _clear_derived_keys():
-    """Clear all derived session state keys while preserving a minimal set.
-
-    Keeps only `global_seed` and `page`. This avoids keeping duplicate large
-    DataFrame copies in session state when a new file is uploaded.
-    """
-    keep_keys = {"global_seed", "page"}
-    for k in list(st.session_state.keys()):
-        if k in keep_keys:
-            continue
-        try:
-            del st.session_state[k]
-        except Exception:
-            # best-effort removal
-            st.session_state[k] = None
+def _clear_derived_keys(keep_base=True):
+    """Clear workflow-derived state while preserving app navigation/settings."""
+    current_page = st.session_state.get("page")
+    clear_all_workflow_state(st.session_state, keep_base=keep_base)
+    if current_page is not None:
+        st.session_state["page"] = current_page
 
 
 def render_input_data():
     st.header("📊 Data")
     st.write("Upload a train CSV file with header. Uploading a new file resets derived data.")
+    st.info(
+        f"Train CSV untuk study group dibatasi maksimal {TRAIN_CSV_LIMIT.max_upload_mb} MB, "
+        f"{MAX_ROWS:,} rows, dan {MAX_COLUMNS} columns. Pastikan train CSV memiliki target column."
+    )
 
     uploaded_file = st.file_uploader("Upload Train CSV (with header)", type=["csv"])
 
     if uploaded_file is not None:
         # read bytes and compute hash to detect new uploads
+        ok, message = validate_upload_size(uploaded_file, TRAIN_CSV_LIMIT, "Train CSV")
+        if not ok:
+            st.error(message)
+            st.stop()
+
         try:
             file_bytes = uploaded_file.read()
             df = pd.read_csv(io.BytesIO(file_bytes))
@@ -38,11 +40,16 @@ def render_input_data():
             st.error(f"Error reading CSV: {e}")
             return
 
+        ok, message = validate_dataframe_shape(df, TRAIN_CSV_LIMIT, "Train CSV")
+        if not ok:
+            st.error(message)
+            st.stop()
+
         file_hash = hashlib.sha256(file_bytes).hexdigest()
         prev_hash = st.session_state.get("upload_hash")
         if prev_hash != file_hash:
             # New file detected -> clear previous derived state
-            _clear_derived_keys()
+            _clear_derived_keys(keep_base=False)
             st.session_state["upload_hash"] = file_hash
 
         st.subheader("Preview")
@@ -53,6 +60,11 @@ def render_input_data():
 
         if st.button("✅ Confirm & Proceed"):
             # Finalize dataset into session_state without forcing a rerun or clearing all derived keys
+            previous_target = st.session_state.get("target_column")
+            previous_task = st.session_state.get("task_type")
+            if previous_target != target_col or previous_task != task_type:
+                _clear_derived_keys(keep_base=True)
+                st.session_state["upload_hash"] = file_hash
             st.session_state["df"] = df.copy()
             st.session_state["target_column"] = target_col
             st.session_state["task_type"] = task_type
@@ -69,7 +81,7 @@ def render_input_data():
             st.write("To replace this dataset, upload a new CSV above or click Replace Dataset.")
             if st.button("🔁 Replace Dataset"):
                 # Clear derived state and allow uploading a new file
-                _clear_derived_keys()
+                _clear_derived_keys(keep_base=False)
                 st.success("Ready for new dataset upload.")
                 try:
                     st.rerun()

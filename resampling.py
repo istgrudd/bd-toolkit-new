@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from ui_components import fix_arrow_compatibility, render_info_panel
+from state_manager import clear_downstream_from_resampling
 
 
 def _check_imblearn():
@@ -79,6 +80,8 @@ def render_resampling(show_info_panel: bool = True):
             # trigger plot rendering in the Preprocessing preview
             st.session_state["resample_plot_trigger"] = True
             st.session_state["last_resample_source"] = src
+            st.session_state["resampling_done"] = True
+            clear_downstream_from_resampling(st.session_state)
             st.success(f"Resampling applied: {method}. Result rows: {len(X_res)}")
             try:
                 st.write(st.session_state["resampled_pre_y_train"].value_counts())

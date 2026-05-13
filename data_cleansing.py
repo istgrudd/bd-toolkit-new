@@ -4,6 +4,7 @@ import numpy as np
 import random
 from ui_components import render_info_panel, fix_arrow_compatibility, available_columns, available_numeric_columns
 from sklearn.base import BaseEstimator, TransformerMixin
+from state_manager import clear_downstream_from_cleansing
 
 
 class CapperTransformer(BaseEstimator, TransformerMixin):
@@ -58,6 +59,10 @@ class CapperTransformer(BaseEstimator, TransformerMixin):
                 # if conversion/clip fails, skip column
                 continue
         return X2
+
+
+def _invalidate_after_cleansing_mutation():
+    clear_downstream_from_cleansing(st.session_state)
 
 
 def render_cleansing():
@@ -132,6 +137,7 @@ def render_cleansing():
                             if st.session_state.get("pre_y_train") is not None:
                                 st.session_state["pre_y_train"] = st.session_state["pre_y_train"].loc[px.index]
                             st.success(f"Dropped {before - len(px)} rows from Train by missingness.")
+                            _invalidate_after_cleansing_mutation()
                         if subset == "Test" and st.session_state.get("pre_X_test") is not None:
                             px = st.session_state.get("pre_X_test")
                             before = len(px)
@@ -143,6 +149,7 @@ def render_cleansing():
                             if st.session_state.get("pre_y_test") is not None:
                                 st.session_state["pre_y_test"] = st.session_state["pre_y_test"].loc[px.index]
                             st.success(f"Dropped {before - len(px)} rows from Test by missingness.")
+                            _invalidate_after_cleansing_mutation()
                 else:
                     before = len(df)
                     if cols:
@@ -151,6 +158,7 @@ def render_cleansing():
                         df2 = df.dropna(axis=0, how=how)
                     st.session_state["df"] = df2
                     st.success(f"Dropped {before - len(df2)} rows from master dataset by missingness.")
+                    _invalidate_after_cleansing_mutation()
 
         # Imputation
         with sub[1]:
@@ -284,6 +292,7 @@ def render_cleansing():
                                     st.session_state["df"] = df
                                 _record_step()
                                 st.success(f"Transformed {len(cols_sorted)} columns using existing imputer ({method}).")
+                                _invalidate_after_cleansing_mutation()
                             except Exception as e:
                                 st.error(f"Error during transform: {e}")
 
@@ -311,6 +320,7 @@ def render_cleansing():
                                 st.session_state["imputation_transformers"][transformer_key] = imputer
                                 _record_step()
                                 st.success(f"Fitted imputer ({method}) for columns: {cols_sorted}")
+                                _invalidate_after_cleansing_mutation()
                         except Exception as e:
                             st.error(f"Error during fit: {e}")
 
@@ -339,6 +349,7 @@ def render_cleansing():
                                     st.session_state["pre_X_test"] = px_test
                                 _record_step()
                                 st.success(f"Applied fit_transform ({method}) on columns: {cols_sorted} for subsets: {impute_subsets}")
+                                _invalidate_after_cleansing_mutation()
                             else:
                                 transformed = imputer.fit_transform(df[cols_sorted])
                                 st.session_state["imputation_transformers"][transformer_key] = imputer
@@ -346,6 +357,7 @@ def render_cleansing():
                                 st.session_state["df"] = df
                                 _record_step()
                                 st.success(f"Applied fit_transform ({method}) on columns: {cols_sorted}")
+                                _invalidate_after_cleansing_mutation()
                         except Exception as e:
                             st.error(f"Error during fit_transform: {e}")
 
@@ -444,6 +456,7 @@ def render_cleansing():
 
                         st.session_state["cleansing_steps"].append({"type": "map_to_missing", "columns": sorted(map_cols), "value": map_value, "value_type": map_type, "subsets": map_subsets})
                         st.success(f"Mapped value '{map_value}' to missing for columns: {map_cols} on subsets: {map_subsets}")
+                        _invalidate_after_cleansing_mutation()
                     except Exception as e:
                         st.error(f"Error applying mapping: {e}")
 
@@ -580,6 +593,7 @@ def render_cleansing():
                         if st.session_state.get("pre_y_train") is not None:
                             st.session_state["pre_y_train"] = st.session_state["pre_y_train"].loc[px.index]
                         st.success(f"Removed {before - len(px)} duplicate rows from Train.")
+                        _invalidate_after_cleansing_mutation()
                     if subset == "Test" and st.session_state.get("pre_X_test") is not None:
                         px = st.session_state.get("pre_X_test")
                         before = len(px)
@@ -588,11 +602,13 @@ def render_cleansing():
                         if st.session_state.get("pre_y_test") is not None:
                             st.session_state["pre_y_test"] = st.session_state["pre_y_test"].loc[px.index]
                         st.success(f"Removed {before - len(px)} duplicate rows from Test.")
+                        _invalidate_after_cleansing_mutation()
             else:
                 before = len(df)
                 df2 = df.drop_duplicates()
                 st.session_state["df"] = df2
                 st.success(f"Removed {before - len(df2)} duplicate rows from master dataset.")
+                _invalidate_after_cleansing_mutation()
 
     # --- Outliers ---
     with tabs[2]:
@@ -714,6 +730,7 @@ def render_cleansing():
                                     st.session_state["pre_y_train"] = st.session_state["pre_y_train"].loc[new_px.index]
                                 if removed:
                                     st.success(f"Removed {removed} outlier rows from Train.")
+                                    _invalidate_after_cleansing_mutation()
                             if subset == "Test" and st.session_state.get("pre_X_test") is not None:
                                 px = st.session_state.get("pre_X_test")
                                 new_px, removed = _handle_on_df(px)
@@ -722,11 +739,13 @@ def render_cleansing():
                                     st.session_state["pre_y_test"] = st.session_state["pre_y_test"].loc[new_px.index]
                                 if removed:
                                     st.success(f"Removed {removed} outlier rows from Test.")
+                                    _invalidate_after_cleansing_mutation()
                     else:
                         new_df, removed = _handle_on_df(df)
                         st.session_state["df"] = new_df
                         if removed:
                             st.success(f"Removed {removed} outlier rows from master dataset.")
+                            _invalidate_after_cleansing_mutation()
 
                 # Convert outlier values to NaN
                 elif action == "Convert to NaN":
@@ -776,6 +795,7 @@ def render_cleansing():
                                 total_train += converted
                                 if converted:
                                     st.success(f"Converted {converted} outlier values to NaN in Train.")
+                                    _invalidate_after_cleansing_mutation()
                             if subset == "Test" and st.session_state.get("pre_X_test") is not None:
                                 px = st.session_state.get("pre_X_test")
                                 new_px, converted = _convert_on_df(px)
@@ -783,6 +803,7 @@ def render_cleansing():
                                 total_test += converted
                                 if converted:
                                     st.success(f"Converted {converted} outlier values to NaN in Test.")
+                                    _invalidate_after_cleansing_mutation()
                         if (total_train + total_test) == 0:
                             st.info("No outlier values found to convert to NaN in selected subsets.")
                         st.session_state.setdefault("cleansing_steps", []).append({"type": "outliers_to_nan", "method": method, "k": k, "columns": cols_sorted, "subsets": out_subsets})
@@ -791,6 +812,7 @@ def render_cleansing():
                         st.session_state["df"] = new_df
                         if converted:
                             st.success(f"Converted {converted} outlier values to NaN in master dataset.")
+                            _invalidate_after_cleansing_mutation()
                         else:
                             st.info("No outlier values found to convert to NaN in master dataset.")
                         st.session_state.setdefault("cleansing_steps", []).append({"type": "outliers_to_nan", "method": method, "k": k, "columns": cols_sorted, "subsets": out_subsets})
@@ -816,6 +838,7 @@ def render_cleansing():
                                     st.session_state["cleansing_steps"] = []
                                 st.session_state["cleansing_steps"].append({"type": "outlier_cap", "method": method, "k": k, "columns": cols_sorted, "action": "fit", "subsets": out_subsets})
                                 st.success(f"Fitted capper for columns: {cols_sorted} (method={method}, k={k})")
+                                _invalidate_after_cleansing_mutation()
                         except Exception as e:
                             st.error(f"Error during fit: {e}")
 
@@ -863,6 +886,7 @@ def render_cleansing():
                                 if "cleansing_steps" not in st.session_state:
                                     st.session_state["cleansing_steps"] = []
                                 st.session_state["cleansing_steps"].append({"type": "outlier_cap", "method": method, "k": k, "columns": cols_sorted, "action": "transform", "subsets": out_subsets})
+                                _invalidate_after_cleansing_mutation()
                             except Exception as e:
                                 st.error(f"Error during transform: {e}")
 
@@ -897,6 +921,7 @@ def render_cleansing():
                                     st.session_state["capper_transformers"][transformer_key] = capper
                                     st.session_state.setdefault("cleansing_steps", []).append({"type": "outlier_cap", "method": method, "k": k, "columns": cols_sorted, "action": "fit_transform", "subsets": out_subsets})
                                     st.success(f"Fitted capper and capped {total_capped} values across subsets: {out_subsets} for columns: {cols_sorted}")
+                                    _invalidate_after_cleansing_mutation()
                             else:
                                 capper.fit(df[cols_sorted])
                                 total_capped = 0
@@ -914,6 +939,7 @@ def render_cleansing():
                                 st.session_state["capper_transformers"][transformer_key] = capper
                                 st.session_state.setdefault("cleansing_steps", []).append({"type": "outlier_cap", "method": method, "k": k, "columns": cols_sorted, "action": "fit_transform", "subsets": out_subsets})
                                 st.success(f"Fitted capper and capped {before_counts} values on master dataset for columns: {cols_sorted}")
+                                _invalidate_after_cleansing_mutation()
                         except Exception as e:
                             st.error(f"Error during fit_transform: {e}")
 
@@ -950,6 +976,7 @@ def render_cleansing():
                             st.error(f"Error dropping columns on {subset}: {e}")
                     st.session_state["cleansing_steps"].append({"type": "drop", "columns": sorted(drop_cols), "subsets": selected_subsets})
                     st.success(f"Dropped columns: {drop_cols} on subsets: {selected_subsets}")
+                    _invalidate_after_cleansing_mutation()
                 else:
                     df = df.drop(columns=drop_cols)
                     st.session_state["df"] = df
@@ -957,6 +984,7 @@ def render_cleansing():
                         st.session_state["cleansing_steps"] = []
                     st.session_state["cleansing_steps"].append({"type": "drop", "columns": sorted(drop_cols)})
                     st.success(f"Dropped columns: {drop_cols}")
+                    _invalidate_after_cleansing_mutation()
 
     # --- Data Types ---
     with tabs[4]:
@@ -998,10 +1026,12 @@ def render_cleansing():
                             px = _apply_convert(px)
                             st.session_state["pre_X_test"] = px
                     st.success(f"Applied conversion to {cols} on subsets: {dtype_subsets}")
+                    _invalidate_after_cleansing_mutation()
                 else:
                     df2 = _apply_convert(df.copy())
                     st.session_state["df"] = df2
                     st.success(f"Applied conversion to {cols} on master dataset.")
+                    _invalidate_after_cleansing_mutation()
 
     # Show current cleansing steps
     st.subheader("Cleansing Steps Log")

@@ -5,6 +5,7 @@ import pandas as pd
 import io
 import hashlib
 from datetime import datetime
+from config_limits import MAX_EVALUATION_PLOTS
 
 
 def annotate_bar_values(ax, fmt: Optional[str] = "{:.2f}", integer: bool = False, fontsize: int = 9):
@@ -418,4 +419,11 @@ def add_plot_to_session(fig, title: Optional[str] = None, page: Optional[str] = 
     st.session_state["evaluation_plots_temp"][fname] = data
     st.session_state["evaluation_plots_meta"][fname] = {"title": title or safe_title, "page": page or "unknown", "kind": kind or "plot", "created_at": ts, "hash": h}
     st.session_state["evaluation_plots_hashes"].add(h)
+    while len(st.session_state["evaluation_plots_temp"]) > MAX_EVALUATION_PLOTS:
+        oldest_name = next(iter(st.session_state["evaluation_plots_temp"]))
+        oldest_meta = st.session_state["evaluation_plots_meta"].pop(oldest_name, {})
+        st.session_state["evaluation_plots_temp"].pop(oldest_name, None)
+        oldest_hash = oldest_meta.get("hash")
+        if oldest_hash is not None:
+            st.session_state["evaluation_plots_hashes"].discard(oldest_hash)
     return fname

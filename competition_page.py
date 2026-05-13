@@ -6,6 +6,17 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from ui_components import render_info_panel, fix_arrow_compatibility
+from config_limits import (
+    ALLOW_UPLOADED_MODEL_BUNDLES,
+    MAX_COLUMNS,
+    MAX_ROWS,
+    SAMPLE_SUBMISSION_LIMIT,
+    TEST_CSV_LIMIT,
+    validate_dataframe_shape,
+    validate_upload_size,
+)
+from ml_correctness import align_features_for_inference, resolve_expected_features
+from state_manager import clear_submission_state
 
 
 def _models_dir():
@@ -57,18 +68,37 @@ def render_export_page():
 
 def render_competition_page():
     st.header("📤 Submission / Competition")
-    st.write("Upload test.csv and apply a saved model bundle to produce a submission file.")
+    st.write("Upload test.csv and apply the current session model or a saved bundle to produce a submission file.")
+    st.info(
+        f"Test CSV maksimal {TEST_CSV_LIMIT.max_upload_mb} MB, {MAX_ROWS:,} rows, dan {MAX_COLUMNS} columns. "
+        "Kolom test harus sesuai dengan fitur saat training; extra column aman, missing required feature akan ditolak."
+    )
 
     models_dir = _models_dir()
     bundles = []
     if os.path.exists(models_dir):
         bundles = [f for f in os.listdir(models_dir) if f.endswith(".pkl")]
 
-    # Three-column row: Model upload / Saved bundle | Test CSV | Sample submission CSV
+    # Three-column row: Current/saved model | Test CSV | Sample submission CSV
     col_model, col_test, col_sample = st.columns(3)
 
     with col_model:
-        model_uploaded = st.file_uploader("Upload model bundle (.pkl)", type=["pkl", "joblib"], key="submission_model_upload")
+        model_uploaded = None
+        if ALLOW_UPLOADED_MODEL_BUNDLES:
+            model_uploaded = st.file_uploader(
+                "Upload model bundle (.pkl/.joblib)",
+                type=["pkl", "joblib"],
+                key="submission_model_upload",
+            )
+        else:
+            st.warning("Upload model bundle dinonaktifkan untuk keamanan. Gunakan model yang dilatih dari aplikasi/session ini.")
+        session_bundle_available = st.session_state.get("trained_model") is not None
+        use_session_model = st.checkbox(
+            "Use current session trained model",
+            value=session_bundle_available,
+            disabled=not session_bundle_available,
+            key="submission_use_session_model",
+        )
         if bundles:
             selected = st.selectbox("Or choose saved bundle", bundles, key="submission_bundle_select")
         else:
@@ -84,7 +114,12 @@ def render_competition_page():
     test_df = None
     sample_df = None
     if test_uploaded is not None:
+        ok, message = validate_upload_size(test_uploaded, TEST_CSV_LIMIT, "Test CSV")
+        if not ok:
+            st.error(message)
+            st.stop()
         try:
+            test_uploaded.seek(0)
             test_df = pd.read_csv(test_uploaded)
             with col_test:
                 st.write(f"Uploaded test: {len(test_df)} rows × {len(test_df.columns)} columns")
@@ -95,9 +130,18 @@ def render_competition_page():
         except Exception as e:
             st.error(f"Error reading uploaded CSV: {e}")
             return
+        ok, message = validate_dataframe_shape(test_df, TEST_CSV_LIMIT, "Test CSV")
+        if not ok:
+            st.error(message)
+            st.stop()
 
     if sample_uploaded is not None:
+        ok, message = validate_upload_size(sample_uploaded, SAMPLE_SUBMISSION_LIMIT, "Sample submission CSV")
+        if not ok:
+            st.error(message)
+            st.stop()
         try:
+            sample_uploaded.seek(0)
             sample_df = pd.read_csv(sample_uploaded)
             with col_sample:
                 st.write(f"Sample submission: {len(sample_df)} rows × {len(sample_df.columns)} columns")
@@ -108,6 +152,10 @@ def render_competition_page():
         except Exception as e:
             st.error(f"Error reading sample submission CSV: {e}")
             return
+        ok, message = validate_dataframe_shape(sample_df, SAMPLE_SUBMISSION_LIMIT, "Sample submission CSV")
+        if not ok:
+            st.error(message)
+            st.stop()
 
     # Allow choosing ID column to drop from test (preserve values for output)
     if test_df is not None:
@@ -135,19 +183,27 @@ def render_competition_page():
         if test_df is None:
             st.error("Please upload a test CSV first.")
             return
+        clear_submission_state(st.session_state)
 
-        # Load model bundle: prefer uploaded model, otherwise use selected saved bundle
+        # Load model bundle: prefer the current in-session model, otherwise use a saved bundle.
+        # User-uploaded pickle/joblib bundles are intentionally disabled.
         bundle = None
-        if model_uploaded is not None:
+        if ALLOW_UPLOADED_MODEL_BUNDLES and model_uploaded is not None:
             try:
                 model_uploaded.seek(0)
                 bundle = joblib.load(io.BytesIO(model_uploaded.read()))
             except Exception as e:
                 st.error(f"Error loading uploaded model bundle: {e}")
                 return
+        elif use_session_model and st.session_state.get("trained_model") is not None:
+            bundle = {
+                "model": st.session_state.get("trained_model"),
+                "preprocessor": st.session_state.get("trained_preprocessor"),
+                "metadata": st.session_state.get("model_metadata", {}) or {},
+            }
         else:
             if selected is None:
-                st.error("No model selected or uploaded. Please upload a model or choose a saved bundle.")
+                st.error("No model selected. Train a model in this session or choose a saved bundle.")
                 return
             try:
                 bundle_path = os.path.join(models_dir, selected)
@@ -158,6 +214,7 @@ def render_competition_page():
 
         model = bundle.get("model")
         preproc = bundle.get("preprocessor")
+        metadata = bundle.get("metadata", {}) or {}
 
         # Prepare DataFrame to transform: drop selected ID column if requested
         if st.session_state.get("submission_drop_id") and st.session_state.get("submission_drop_id") != "-- none --":
@@ -189,6 +246,16 @@ def render_competition_page():
         except Exception as e:
             st.error(f"Preprocessing error: {e}")
             return
+
+        expected_features = resolve_expected_features(metadata, model)
+        if expected_features:
+            try:
+                Xp = align_features_for_inference(Xp, expected_features)
+            except ValueError as e:
+                st.error(str(e))
+                return
+        else:
+            st.warning("Feature-order validation is limited because this model bundle has no feature metadata.")
 
         # Predict
         try:
@@ -290,12 +357,16 @@ def render_competition_page():
         st.dataframe(fix_arrow_compatibility(out.sample(5) if len(out) > 5 else out))
 
         csv_bytes = out.to_csv(index=False).encode("utf-8")
+        st.session_state["submission_predictions"] = list(preds)
+        st.session_state["submission_df"] = out.copy()
+        st.session_state["submission_csv"] = csv_bytes
         st.download_button("Download submission.csv", data=csv_bytes, file_name="submission.csv")
 
         # Also show the full original test DataFrame with predictions appended
         try:
             full_df = test_df.copy()
             full_df[final_pred_col_name] = list(preds)
+            st.session_state["submission_full_df"] = full_df.copy()
             st.subheader("Full test set with predictions (all columns)")
             try:
                 st.dataframe(fix_arrow_compatibility(full_df.sample(5) if len(full_df) > 5 else full_df))

@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from ui_components import fix_arrow_compatibility, render_info_panel
+from state_manager import clear_downstream_from_sampling
 
 
 def render_sampling(show_info_panel: bool = True):
@@ -64,6 +65,8 @@ def render_sampling(show_info_panel: bool = True):
             key_y = f"sampled_y_{subset.lower()}"
             st.session_state[key_x] = sampled_X.copy()
             st.session_state[key_y] = sampled_y.copy() if sampled_y is not None else None
+            st.session_state["sampling_done"] = True
+            clear_downstream_from_sampling(st.session_state)
 
             st.success(f"Created sample of {len(sampled_X)} rows from {subset} set (method={sampling_type}).")
             try:

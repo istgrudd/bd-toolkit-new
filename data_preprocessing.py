@@ -9,6 +9,14 @@ import inspect
 from ui_components import render_info_panel, fix_arrow_compatibility, annotate_bar_values
 from sampling import render_sampling
 from resampling import render_resampling
+from config_limits import (
+    MAX_ONE_HOT_OUTPUT_COLUMNS,
+    MAX_ONE_HOT_UNIQUE_VALUES_PER_COLUMN,
+    validate_one_hot_output_width,
+    validate_one_hot_request,
+)
+from ml_correctness import apply_fitted_scaler_to_columns
+from state_manager import clear_downstream_from_preprocessing
 
 
 def _ensure_pre_X_train():
@@ -32,10 +40,18 @@ def _record_preprocessing_step(step: dict):
     if "preprocessing_steps" not in st.session_state:
         st.session_state["preprocessing_steps"] = []
     st.session_state["preprocessing_steps"].append(step)
+    clear_downstream_from_preprocessing(st.session_state)
 
 
 def render_preprocessing():
+    preprocessing_help = (
+        "Gunakan one-hot untuk kategori dengan jumlah unique kecil. "
+        f"Batasnya {MAX_ONE_HOT_UNIQUE_VALUES_PER_COLUMN} kategori unik per kolom "
+        f"dan {MAX_ONE_HOT_OUTPUT_COLUMNS} output column baru."
+    )
     st.header("⚙️ Preprocessing")
+
+    st.info(preprocessing_help)
 
     if "df" not in st.session_state or st.session_state.get("df") is None:
         st.warning("No dataset uploaded yet. Please upload data on the Data page.")
@@ -172,19 +188,26 @@ def render_preprocessing():
                                 if st.session_state.get("split_done"):
                                     for subset in scaling_subsets:
                                         if subset == "Train" and st.session_state.get("pre_X_train") is not None:
-                                            px = st.session_state.get("pre_X_train")
-                                            px.loc[:, sel_cols_scaling] = fitted.transform(px[sel_cols_scaling])
-                                            st.session_state["pre_X_train"] = px
+                                            st.session_state["pre_X_train"] = apply_fitted_scaler_to_columns(
+                                                st.session_state.get("pre_X_train"),
+                                                sel_cols_scaling,
+                                                fitted,
+                                            )
                                         elif subset == "Test" and st.session_state.get("pre_X_test") is not None:
-                                            px = st.session_state.get("pre_X_test")
-                                            px.loc[:, sel_cols_scaling] = fitted.transform(px[sel_cols_scaling])
-                                            st.session_state["pre_X_test"] = px
-                                    else:
-                                        pre_x_local = st.session_state.get("pre_X_train")
-                                        df_master_local = st.session_state.get("df")
-                                        X_local = pre_x_local if pre_x_local is not None else df_master_local
-                                    X_local.loc[:, sel_cols_scaling] = fitted.transform(X_local[sel_cols_scaling])
-                                    st.session_state["pre_X_train"] = X_local
+                                            st.session_state["pre_X_test"] = apply_fitted_scaler_to_columns(
+                                                st.session_state.get("pre_X_test"),
+                                                sel_cols_scaling,
+                                                fitted,
+                                            )
+                                else:
+                                    source = st.session_state.get("pre_X_train")
+                                    if source is None:
+                                        source = st.session_state.get("df")
+                                    st.session_state["pre_X_train"] = apply_fitted_scaler_to_columns(
+                                        source,
+                                        sel_cols_scaling,
+                                        fitted,
+                                    )
                                 _record_preprocessing_step({"type": "scaling", "method": scaler_name, "columns": sorted(sel_cols_scaling), "action": action_scale, "target_data": scaling_subsets})
                                 st.success(f"Applied {action_scale} with {scaler_name} to {sel_cols_scaling} on subsets {scaling_subsets}")
 
@@ -416,10 +439,15 @@ def render_preprocessing():
                                         names = ohe.get_feature_names(cols_sorted)
                                     except Exception:
                                         names = [f"ohe_{i}" for i in range(len(cols_sorted))]
+                                output_columns = len(names)
 
                                 if st.session_state.get("split_done"):
                                     px = st.session_state.get("pre_X_train")
                                     if px is not None:
+                                        ok, message = validate_one_hot_output_width(px.shape[1], len(cols_sorted), output_columns)
+                                        if not ok:
+                                            st.error(message)
+                                            st.stop()
                                         arr = ohe.transform(px[cols_sorted])
                                         if hasattr(arr, "toarray"):
                                             arr = arr.toarray()
@@ -429,6 +457,10 @@ def render_preprocessing():
                                         st.session_state["pre_X_train"] = px
                                     px_test = st.session_state.get("pre_X_test")
                                     if px_test is not None:
+                                        ok, message = validate_one_hot_output_width(px_test.shape[1], len(cols_sorted), output_columns)
+                                        if not ok:
+                                            st.error(message)
+                                            st.stop()
                                         arr_t = ohe.transform(px_test[cols_sorted])
                                         if hasattr(arr_t, "toarray"):
                                             arr_t = arr_t.toarray()
@@ -437,6 +469,10 @@ def render_preprocessing():
                                         px_test = pd.concat([px_test, df_ohe_t], axis=1)
                                         st.session_state["pre_X_test"] = px_test
                                 else:
+                                    ok, message = validate_one_hot_output_width(X.shape[1], len(cols_sorted), output_columns)
+                                    if not ok:
+                                        st.error(message)
+                                        st.stop()
                                     arr = ohe.transform(X[cols_sorted])
                                     if hasattr(arr, "toarray"):
                                         arr = arr.toarray()
@@ -465,6 +501,12 @@ def render_preprocessing():
                                 return OneHotEncoder(**kwargs)
 
                             ohe = _make_onehot_encoder(handle_unknown="ignore", dense=True)
+                            source_df = st.session_state.get("pre_X_train") if st.session_state.get("split_done") else X
+                            if source_df is not None:
+                                ok, message = validate_one_hot_request(source_df, cols_sorted)
+                                if not ok:
+                                    st.error(message)
+                                    st.stop()
 
                             if st.session_state.get("split_done"):
                                 px = st.session_state.get("pre_X_train")

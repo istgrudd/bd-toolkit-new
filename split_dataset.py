@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from ui_components import render_info_panel, fix_arrow_compatibility, annotate_bar_values, add_plot_to_session
+from state_manager import clear_downstream_from_split, clear_split_state
 
 
 def render_split_dataset():
@@ -49,6 +50,8 @@ def render_split_dataset():
                 stratify_col = y if (task_type == "Classification" and stratify_option) else None
                 X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=test_frac, random_state=seed, stratify=stratify_col)
 
+                clear_split_state(st.session_state)
+                clear_downstream_from_split(st.session_state)
                 st.session_state["pre_X_train"] = X_tr.copy()
                 st.session_state["pre_X_test"] = X_te.copy()
                 st.session_state["pre_y_train"] = y_tr.copy()
@@ -122,11 +125,8 @@ def render_split_dataset():
             # non-fatal: continue without plots
             pass
         if st.button("Reset Split", key="reset_split"):
-            st.session_state["split_done"] = False
-            st.session_state.pop("pre_X_test", None)
-            st.session_state.pop("pre_y_test", None)
-            st.session_state["pre_X_train"] = None
-            st.session_state["pre_y_train"] = None
+            clear_split_state(st.session_state)
+            clear_downstream_from_split(st.session_state)
             st.success("Split cleared. You can run a new split now.")
 
     render_info_panel("Split Dataset")

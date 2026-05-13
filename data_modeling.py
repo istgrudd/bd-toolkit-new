@@ -21,12 +21,32 @@ from sklearn.metrics import (
     mean_squared_error,
     r2_score,
     confusion_matrix,
+    classification_report,
 )
 from sklearn.inspection import permutation_importance
 
 # ensure local module imports work when pytest changes CWD
 sys.path.insert(0, os.path.dirname(__file__))
 from ui_components import render_info_panel, fix_arrow_compatibility, add_plot_to_session
+from config_limits import (
+    MAX_CV_FOLDS,
+    MAX_PERMUTATION_IMPORTANCE_REPEATS,
+    MAX_RANDOM_FOREST_ESTIMATORS,
+    PERMUTATION_IMPORTANCE_DEFAULT_ENABLED,
+    can_run_permutation_importance,
+    clamp_model_params,
+    validate_one_hot_output_width,
+)
+from state_manager import (
+    clear_downstream_from_validation,
+    clear_training_state,
+    clear_validation_state,
+)
+from ml_correctness import (
+    align_features_for_inference,
+    build_training_metadata,
+    validate_required_features,
+)
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.dummy import DummyClassifier, DummyRegressor
@@ -38,7 +58,7 @@ DISABLE_BUNDLE_SAVING = True
 
 # Simple model registry + defaults for the UI
 DEFAULT_HYPERPARAMETERS = {
-    "RandomForest": {"n_estimators": 100, "max_depth": None},
+    "RandomForest": {"n_estimators": MAX_RANDOM_FOREST_ESTIMATORS, "max_depth": None},
     "LogisticRegression": {"C": 1.0, "max_iter": 200},
     "LinearRegression": {},
     "XGBoost": {"n_estimators": 100, "learning_rate": 0.1},
@@ -92,24 +112,28 @@ def _instantiate_model(model_name, params=None):
 class SessionPreprocessor:
     """Minimal session preprocessor capturing fitted transformers.
 
-    Tests only require that this can be instantiated and that `transform`
-    returns a DataFrame. Implement a safe no-op transform that returns a
-    copy of the input DataFrame (or converts arrays to DataFrame).
+    Replays supported fitted preprocessing steps and raises a clear error when
+    a required transformer/feature is missing, so prediction does not continue
+    with partially transformed data.
     """
-
     def __init__(self, imputation_transformers=None, scalers=None, encoders=None, preprocessing_steps=None):
         self.imputation_transformers = imputation_transformers or {}
         self.scalers = scalers or {}
         self.encoders = encoders or {}
         self.preprocessing_steps = preprocessing_steps or []
 
+    @staticmethod
+    def _step_applies_transform(step):
+        action = step.get("action_performed", step.get("action", "fit_transform"))
+        return action in ("transform", "fit_transform", "create")
+
     def transform(self, X):
         """Apply stored preprocessing to a new DataFrame X and return transformed DataFrame.
 
         This method attempts to replay recorded preprocessing steps in order where
         possible using the fitted transformers saved in this object. It is
-        defensive: missing transformers or missing columns are skipped rather
-        than raising, to keep prediction paths robust.
+        transform errors are collected and raised so prediction cannot continue
+        with a partially transformed feature matrix.
         """
         if X is None:
             return X
@@ -128,9 +152,12 @@ class SessionPreprocessor:
         scals = self.scalers or {}
         encs = self.encoders or {}
 
-        for step in (self.preprocessing_steps or []):
+        errors = []
+        for idx, step in enumerate(self.preprocessing_steps or []):
             try:
                 ttype = step.get("type")
+                if not self._step_applies_transform(step):
+                    continue
 
                 # Imputation
                 if ttype == "imputation":
@@ -148,9 +175,13 @@ class SessionPreprocessor:
                                 break
                     if imputer is not None:
                         present = [c for c in cols if c in Xp.columns]
-                        if present:
-                            transformed = imputer.transform(Xp[present])
-                            Xp.loc[:, present] = transformed
+                        missing = [c for c in cols if c not in Xp.columns]
+                        if missing:
+                            raise ValueError("missing columns: " + ", ".join(missing))
+                        transformed = imputer.transform(Xp[present])
+                        Xp.loc[:, present] = transformed
+                    else:
+                        raise ValueError(f"imputer not found for columns {cols}")
 
                 # Scaling
                 elif ttype == "scaling":
@@ -167,8 +198,12 @@ class SessionPreprocessor:
                                 break
                     if scaler is not None:
                         present = [c for c in cols if c in Xp.columns]
-                        if present:
-                            Xp.loc[:, present] = scaler.transform(Xp[present])
+                        missing = [c for c in cols if c not in Xp.columns]
+                        if missing:
+                            raise ValueError("missing columns: " + ", ".join(missing))
+                        Xp.loc[:, present] = scaler.transform(Xp[present])
+                    else:
+                        raise ValueError(f"scaler not found for columns {cols}")
 
                 # Encoding
                 elif ttype == "encoding":
@@ -181,7 +216,7 @@ class SessionPreprocessor:
                     if method == "LabelEncoder":
                         for col in cols:
                             if col not in Xp.columns:
-                                continue
+                                raise ValueError(f"missing column: {col}")
                             key_col = f"label::{col}"
                             le = encs.get(key_col) or encs.get(f"encoder::LabelEncoder::{col}")
                             if le is None:
@@ -194,6 +229,8 @@ class SessionPreprocessor:
                                 classes = getattr(le, "classes_", [])
                                 mapping = {v: i for i, v in enumerate(classes)}
                                 Xp[col] = Xp[col].astype(str).map(mapping)
+                            else:
+                                raise ValueError(f"label encoder not found for column {col}")
 
                     # OneHotEncoder (multi-column)
                     elif method == "OneHotEncoder":
@@ -212,22 +249,31 @@ class SessionPreprocessor:
                                             break
                         if ohe is not None:
                             # only transform if all required columns are present
-                            if all(c in Xp.columns for c in cols_sorted):
-                                arr = ohe.transform(Xp[cols_sorted])
-                                try:
-                                    names = ohe.get_feature_names_out(cols_sorted)
-                                except Exception:
-                                    # fallback generic names
-                                    names = [f"ohe_{i}" for i in range(arr.shape[1])]
-                                df_ohe = pd.DataFrame(arr, columns=names, index=Xp.index)
-                                Xp = Xp.drop(columns=cols_sorted)
-                                Xp = pd.concat([Xp, df_ohe], axis=1)
+                            missing = [c for c in cols_sorted if c not in Xp.columns]
+                            if missing:
+                                raise ValueError("missing columns: " + ", ".join(missing))
+                            arr = ohe.transform(Xp[cols_sorted])
+                            if hasattr(arr, "toarray"):
+                                arr = arr.toarray()
+                            try:
+                                names = ohe.get_feature_names_out(cols_sorted)
+                            except Exception:
+                                # fallback generic names
+                                names = [f"ohe_{i}" for i in range(arr.shape[1])]
+                            ok, message = validate_one_hot_output_width(Xp.shape[1], len(cols_sorted), len(names))
+                            if not ok:
+                                raise ValueError(message)
+                            df_ohe = pd.DataFrame(arr, columns=names, index=Xp.index)
+                            Xp = Xp.drop(columns=cols_sorted)
+                            Xp = pd.concat([Xp, df_ohe], axis=1)
+                        else:
+                            raise ValueError(f"one-hot encoder not found for columns {cols_sorted}")
 
                     # OrdinalEncoder (per-column expected)
                     elif method == "OrdinalEncoder":
                         for col in cols:
                             if col not in Xp.columns:
-                                continue
+                                raise ValueError(f"missing column: {col}")
                             key_col = f"encoder::OrdinalEncoder::{col}"
                             ord_enc = encs.get(key_col)
                             if ord_enc is None:
@@ -240,13 +286,15 @@ class SessionPreprocessor:
                                 cats = ord_enc.categories_[0] if hasattr(ord_enc, "categories_") and len(ord_enc.categories_) > 0 else []
                                 mapping = {v: i for i, v in enumerate(cats)}
                                 Xp[col] = Xp[col].astype(str).map(mapping)
+                            else:
+                                raise ValueError(f"ordinal encoder not found for column {col}")
 
                 # Value mappings recorded under preprocessing (maps dict)
                 elif ttype == "value_mapping":
                     mappings = step.get("mappings") or {}
                     for col_name, maps in mappings.items():
                         if col_name not in Xp.columns:
-                            continue
+                            raise ValueError(f"missing column: {col_name}")
                         for m in maps:
                             bef = m.get("before")
                             aft = m.get("after")
@@ -265,16 +313,28 @@ class SessionPreprocessor:
                                 mask = Xp[col_name].astype(str) == str(bef)
                                 Xp.loc[mask, col_name] = aft
 
-                # other step types (feature_engineering, sampling, resampling, etc.) are skipped
-            except Exception:
-                # swallow errors per-step to avoid breaking prediction flow
-                continue
+                elif ttype == "feature_engineering":
+                    raise ValueError("feature engineering replay is not supported by the current session preprocessor")
 
+                # sampling/resampling do not transform inference rows and are skipped.
+            except Exception as exc:
+                label = step.get("type") or f"step_{idx}"
+                cols = step.get("columns") or step.get("mappings") or ""
+                errors.append(f"{label} {cols}: {exc}")
+
+        if errors:
+            raise ValueError("Preprocessing transform failed: " + " | ".join(errors))
         return Xp
 
 
 def render_validation():
+    validation_help = (
+        f"Untuk performa workshop, CV folds maksimal {MAX_CV_FOLDS}. "
+        "Permutation importance nonaktif secara default karena mahal secara komputasi."
+    )
     st.header("🔍 Validation")
+
+    st.info(validation_help)
 
     if "df" not in st.session_state or st.session_state.get("df") is None:
         st.warning("No dataset available. Upload data on the Data page first.")
@@ -330,7 +390,10 @@ def render_validation():
         if isinstance(v, bool):
             user_params[k] = st.checkbox(k, value=v)
         elif isinstance(v, int):
-            user_params[k] = int(st.number_input(k, value=int(v)))
+            number_kwargs = {"value": int(v)}
+            if model_name == "RandomForest" and k == "n_estimators":
+                number_kwargs.update({"min_value": 1, "max_value": MAX_RANDOM_FOREST_ESTIMATORS})
+            user_params[k] = int(st.number_input(k, **number_kwargs))
         elif isinstance(v, float):
             user_params[k] = float(st.number_input(k, value=float(v)))
         else:
@@ -339,13 +402,21 @@ def render_validation():
     st.subheader("Validation Method")
     method = st.selectbox("Method", ["Cross-Validation", "Train/Validation Split"], index=0, key="val_method")
     if method == "Cross-Validation":
-        n_splits = st.slider("n_splits", 2, 10, 5)
+        n_splits = st.slider("n_splits", 2, MAX_CV_FOLDS, min(5, MAX_CV_FOLDS))
+        n_splits = min(int(n_splits), MAX_CV_FOLDS)
+        st.info(f"CV folds dibatasi maksimal {MAX_CV_FOLDS} untuk menjaga performa workshop.")
         if st.session_state.get("task_type") == "Classification":
             splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=int(st.session_state.get("global_seed", 42)))
         else:
             splitter = KFold(n_splits=n_splits, shuffle=True, random_state=int(st.session_state.get("global_seed", 42)))
     else:
         val_size = st.slider("Validation size", 5, 50, 20, step=5)
+    run_permutation_importance = st.checkbox(
+        "Permutation importance",
+        value=PERMUTATION_IMPORTANCE_DEFAULT_ENABLED,
+        help="Disabled by default because it is CPU-heavy.",
+        key="val_permutation_importance",
+    )
 
     # Feature selection mode: All or Select Features
     features_mode = st.radio("Features to apply:", ["All", "Select Features"], horizontal=True, index=0, key="val_features_mode")
@@ -378,6 +449,9 @@ def render_validation():
                         params[kk] = DEFAULT_HYPERPARAMETERS[model_name][kk]
                     else:
                         params[kk] = vv
+            params, param_warnings = clamp_model_params(model_name, params)
+            for warning in param_warnings:
+                st.warning(warning)
 
             # apply feature selection if requested
             if features_mode == "Select Features":
@@ -388,6 +462,8 @@ def render_validation():
             else:
                 X_use = X
 
+            clear_validation_state(st.session_state)
+            clear_downstream_from_validation(st.session_state)
             model = _instantiate_model(model_name, params)
 
             metrics_accum = {}
@@ -400,6 +476,7 @@ def render_validation():
                 # accumulate true/pred for aggregated confusion matrix
                 y_true_all = []
                 y_pred_all = []
+                permutation_skip_warning_shown = False
                 for train_idx, val_idx in splitter.split(X_use, y):
                     fold += 1
                     X_tr, X_val = X_use.iloc[train_idx], X_use.iloc[val_idx]
@@ -444,12 +521,27 @@ def render_validation():
                     elif hasattr(m, "coef_"):
                         coef = np.ravel(getattr(m, "coef_"))
                         importances.append(np.abs(coef))
-                    else:
+                    elif run_permutation_importance:
                         try:
-                            r = permutation_importance(m, X_val, y_val, n_repeats=5, random_state=seed)
-                            importances.append(r.importances_mean)
+                            ok, message = can_run_permutation_importance(X_val)
+                            if not ok:
+                                if not permutation_skip_warning_shown:
+                                    st.warning(message)
+                                    permutation_skip_warning_shown = True
+                                importances.append(None)
+                            else:
+                                r = permutation_importance(
+                                    m,
+                                    X_val,
+                                    y_val,
+                                    n_repeats=MAX_PERMUTATION_IMPORTANCE_REPEATS,
+                                    random_state=seed,
+                                )
+                                importances.append(r.importances_mean)
                         except Exception:
                             importances.append(None)
+                    else:
+                        importances.append(None)
 
                 # aggregate metrics
                 # prepare validation_summary
@@ -536,12 +628,25 @@ def render_validation():
                 elif hasattr(m, "coef_"):
                     coef = np.ravel(getattr(m, "coef_"))
                     imp_series = pd.Series(np.abs(coef), index=X_use.columns).sort_values(ascending=False)
-                else:
+                elif run_permutation_importance:
                     try:
-                        r = permutation_importance(m, X_val, y_val, n_repeats=5, random_state=seed)
-                        imp_series = pd.Series(r.importances_mean, index=X_use.columns).sort_values(ascending=False)
+                        ok, message = can_run_permutation_importance(X_val)
+                        if not ok:
+                            st.warning(message)
+                            imp_series = None
+                        else:
+                            r = permutation_importance(
+                                m,
+                                X_val,
+                                y_val,
+                                n_repeats=MAX_PERMUTATION_IMPORTANCE_REPEATS,
+                                random_state=seed,
+                            )
+                            imp_series = pd.Series(r.importances_mean, index=X_use.columns).sort_values(ascending=False)
                     except Exception:
                         imp_series = None
+                else:
+                    imp_series = None
 
                 validation_summary = {
                     "model_name": model_name,
@@ -580,7 +685,7 @@ def render_validation():
                 except Exception:
                     pass
             else:
-                st.warning("Feature importance not available for this model; permutation importance may have failed.")
+                st.warning("Feature importance not available. Permutation importance is disabled by default or was skipped by limits.")
 
         except Exception as e:
             st.error(f"Validation error: {e}")
@@ -593,6 +698,11 @@ def render_modeling():
 
     Trains final model, evaluates on test set if present, and allows exporting bundles.
     """
+    training_help = (
+        f"RandomForest dibatasi maksimal {MAX_RANDOM_FOREST_ESTIMATORS} estimators. "
+        "Setelah training, gunakan Evaluation Summary untuk membaca metric dan Submission untuk membuat CSV prediksi."
+    )
+    st.info(training_help)
     st.header("🎓 Training")
 
     if "df" not in st.session_state or st.session_state.get("df") is None:
@@ -612,7 +722,10 @@ def render_modeling():
         if isinstance(v, bool):
             user_params[k] = st.checkbox(k, value=v)
         elif isinstance(v, int):
-            user_params[k] = int(st.number_input(k, value=int(v)))
+            number_kwargs = {"value": int(v)}
+            if model_name == "RandomForest" and k == "n_estimators":
+                number_kwargs.update({"min_value": 1, "max_value": MAX_RANDOM_FOREST_ESTIMATORS})
+            user_params[k] = int(st.number_input(k, **number_kwargs))
         elif isinstance(v, float):
             user_params[k] = float(st.number_input(k, value=float(v)))
         else:
@@ -681,6 +794,9 @@ def render_modeling():
                         params[kk] = DEFAULT_HYPERPARAMETERS[model_name][kk]
                     else:
                         params[kk] = vv
+            params, param_warnings = clamp_model_params(model_name, params)
+            for warning in param_warnings:
+                st.warning(warning)
 
             # apply feature selection if requested
             if train_features_mode == "Select Features":
@@ -691,9 +807,12 @@ def render_modeling():
             else:
                 X_train_use = X_train
 
+            clear_training_state(st.session_state)
             model = _instantiate_model(model_name, params)
             model.fit(X_train_use, y_train)
             st.session_state["trained_model"] = model
+            training_feature_names = list(X_train_use.columns)
+            selected_features_meta = list(train_selected_features or training_feature_names)
 
             # evaluate on hold-out test if available
             if st.session_state.get("pre_X_test") is not None and st.session_state.get("pre_y_test") is not None:
@@ -701,53 +820,75 @@ def render_modeling():
                 y_test = st.session_state.get("pre_y_test")
                 # respect selected features when evaluating on test set
                 if train_features_mode == "Select Features":
-                    # use intersection to avoid missing columns
-                    test_cols = [c for c in train_selected_features if c in X_test.columns]
-                    if not test_cols:
-                        st.warning("Selected features not present in test set; skipping test evaluation.")
+                    missing = validate_required_features(X_test, train_selected_features)
+                    if missing:
+                        st.error(
+                            "Selected features are missing in test data: "
+                            + ", ".join(missing)
+                            + ". Please rerun preprocessing/training with consistent features."
+                        )
                         X_test_use = None
                     else:
-                        X_test_use = X_test[test_cols]
+                        X_test_use = align_features_for_inference(X_test, train_selected_features)
                 else:
-                    X_test_use = X_test
+                    X_test_use = align_features_for_inference(X_test, training_feature_names)
 
                 if X_test_use is not None:
                     y_pred = model.predict(X_test_use)
-                    # if classification, compute confusion matrix for test evaluation
+                    eval_summary = {
+                        "task_type": st.session_state.get("task_type"),
+                        "model_name": model_name,
+                        "selected_features": selected_features_meta,
+                        "training_feature_names": training_feature_names,
+                        "metrics": {},
+                        "warnings": [],
+                    }
                     if st.session_state.get("task_type") == "Classification":
-                        try:
-                            labels = np.unique(np.concatenate([y_test, y_pred]))
-                            cm = confusion_matrix(y_test, y_pred, labels=labels)
-                            eval_summary["confusion_matrix"] = cm
-                            eval_summary["confusion_matrix_labels"] = list(labels)
-                        except Exception:
-                            pass
-                if st.session_state.get("task_type") == "Classification":
-                    acc = accuracy_score(y_test, y_pred)
-                    prec = precision_score(y_test, y_pred, average="macro", zero_division=0)
-                    rec = recall_score(y_test, y_pred, average="macro", zero_division=0)
-                    f1 = f1_score(y_test, y_pred, average="macro", zero_division=0)
-                    try:
+                        metrics = {
+                            "accuracy": accuracy_score(y_test, y_pred),
+                            "precision": precision_score(y_test, y_pred, average="macro", zero_division=0),
+                            "recall": recall_score(y_test, y_pred, average="macro", zero_division=0),
+                            "f1": f1_score(y_test, y_pred, average="macro", zero_division=0),
+                        }
                         if hasattr(model, "predict_proba"):
-                            prob = model.predict_proba(X_test)
-                            if prob.shape[1] > 1:
-                                roc = roc_auc_score(y_test, prob, multi_class="ovr")
-                            else:
-                                roc = roc_auc_score(y_test, prob[:, 1])
+                            try:
+                                prob = model.predict_proba(X_test_use)
+                                labels_for_auc = np.unique(np.asarray(y_test))
+                                if prob.ndim == 2 and prob.shape[1] > 1 and len(labels_for_auc) > 2:
+                                    metrics["roc_auc"] = roc_auc_score(y_test, prob, multi_class="ovr")
+                                elif prob.ndim == 2 and prob.shape[1] > 1:
+                                    metrics["roc_auc"] = roc_auc_score(y_test, prob[:, 1])
+                                else:
+                                    metrics["roc_auc"] = roc_auc_score(y_test, prob)
+                            except Exception as exc:
+                                warning = f"ROC AUC skipped: {exc}"
+                                eval_summary["warnings"].append(warning)
+                                st.warning(warning)
                         else:
-                            roc = None
-                    except Exception:
-                        roc = None
-                    eval_summary = {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1, "roc_auc": roc}
-                else:
-                    mae = mean_absolute_error(y_test, y_pred)
-                    mse = mean_squared_error(y_test, y_pred)
-                    rmse = float(np.sqrt(mse))
-                    r2 = r2_score(y_test, y_pred)
-                    eval_summary = {"mae": mae, "mse": mse, "rmse": rmse, "r2": r2}
+                            warning = "ROC AUC skipped: model does not provide predict_proba()."
+                            eval_summary["warnings"].append(warning)
+                            st.warning(warning)
+                        labels = np.unique(np.concatenate([np.asarray(y_test), np.asarray(y_pred)]))
+                        eval_summary["confusion_matrix"] = confusion_matrix(y_test, y_pred, labels=labels)
+                        eval_summary["confusion_matrix_labels"] = list(labels)
+                        eval_summary["classification_report"] = classification_report(
+                            y_test,
+                            y_pred,
+                            zero_division=0,
+                            output_dict=True,
+                        )
+                        eval_summary["metrics"] = metrics
+                    else:
+                        mse = mean_squared_error(y_test, y_pred)
+                        eval_summary["metrics"] = {
+                            "mae": mean_absolute_error(y_test, y_pred),
+                            "mse": mse,
+                            "rmse": float(np.sqrt(mse)),
+                            "r2": r2_score(y_test, y_pred),
+                        }
 
-                st.session_state["training_evaluation_summary"] = eval_summary
-                st.write(eval_summary)
+                    st.session_state["training_evaluation_summary"] = eval_summary
+                    st.write(eval_summary)
             else:
                 st.info("No hold-out test set found (split). Training completed on selected training data.")
 
@@ -759,6 +900,18 @@ def render_modeling():
                 preprocessing_steps=st.session_state.get("preprocessing_steps", []),
             )
             st.session_state["trained_preprocessor"] = preprocessor
+            st.session_state["model_metadata"] = build_training_metadata(
+                model_name=model_name,
+                task_type=st.session_state.get("task_type"),
+                target_column=st.session_state.get("target_column"),
+                training_feature_names=training_feature_names,
+                selected_features=selected_features_meta,
+                extra={
+                    "random_seed": seed,
+                    "hyperparameters": params,
+                    "training_dataset": train_choice,
+                },
+            )
             st.success("Model trained and preprocessor prepared in session.")
 
         except Exception as e:
@@ -783,6 +936,7 @@ def render_modeling():
                 else:
                     model_obj = st.session_state.get("trained_model")
                     preproc_obj = st.session_state.get("trained_preprocessor")
+                    session_model_meta = st.session_state.get("model_metadata", {}) or {}
                     # determine selected features for metadata (respect train UI)
                     if st.session_state.get("train_features_mode") == "Select Features":
                         sel_feats_meta = st.session_state.get("train_selected_features", []) or []
@@ -797,11 +951,13 @@ def render_modeling():
                         "target_column": st.session_state.get("target_column"),
                         "preprocessing_steps": st.session_state.get("preprocessing_steps", []),
                         "cleansing_steps": st.session_state.get("cleansing_steps", []),
-                        "selected_features": sel_feats_meta,
+                        "training_feature_names": session_model_meta.get("training_feature_names", sel_feats_meta),
+                        "selected_features": session_model_meta.get("selected_features", sel_feats_meta),
                         "hyperparameters": user_params,
                         "validation_summary": st.session_state.get("validation_summary"),
                         "evaluation_summary": st.session_state.get("training_evaluation_summary"),
                     }
+                    metadata.update({k: v for k, v in session_model_meta.items() if k not in metadata})
 
                     bundle = {"model": model_obj, "preprocessor": preproc_obj, "metadata": metadata}
                     bundle_path = os.path.join(models_dir, f"{bundle_name}.pkl")
@@ -865,6 +1021,7 @@ def render_modeling():
     else:
         try:
             # build export metadata similar to save flow
+            session_model_meta = st.session_state.get("model_metadata", {}) or {}
             if st.session_state.get("train_features_mode") == "Select Features":
                 sel_feats_meta = st.session_state.get("train_selected_features", []) or []
             else:
@@ -878,11 +1035,13 @@ def render_modeling():
                 "target_column": st.session_state.get("target_column"),
                 "preprocessing_steps": st.session_state.get("preprocessing_steps", []),
                 "cleansing_steps": st.session_state.get("cleansing_steps", []),
-                "selected_features": sel_feats_meta,
+                "training_feature_names": session_model_meta.get("training_feature_names", sel_feats_meta),
+                "selected_features": session_model_meta.get("selected_features", sel_feats_meta),
                 "hyperparameters": user_params,
                 "validation_summary": st.session_state.get("validation_summary"),
                 "evaluation_summary": st.session_state.get("training_evaluation_summary"),
             }
+            metadata_export.update({k: v for k, v in session_model_meta.items() if k not in metadata_export})
 
             bundle_export = {
                 "model": st.session_state.get("trained_model"),

@@ -17,6 +17,8 @@ from split_dataset import render_split_dataset
 from data_visualization import render_data_visualization
 from competition_page import render_competition_page, render_export_page
 from ui_components import render_info_panel
+from state_manager import clear_all_workflow_state, session_diagnostics
+from config_limits import MAX_COLUMNS, MAX_ROWS, MAX_TEST_UPLOAD_MB, MAX_TRAIN_UPLOAD_MB
 
 SESSION_KEYS = [
     "df",
@@ -71,14 +73,16 @@ def init_session_state():
 
 
 def reset_data():
-    preserve = {"global_seed", "page"}
+    page = st.session_state.get("page", "Landing")
+    seed = int(st.session_state.get("global_seed", 42))
+    clear_all_workflow_state(st.session_state, keep_base=False)
+    st.session_state["global_seed"] = seed
+    st.session_state["page"] = page if page in SIDEBAR_PAGES else "Landing"
     for key in SESSION_KEYS:
-        if key in preserve:
+        if key in ("global_seed", "page"):
             continue
-        if isinstance(st.session_state.get(key), list):
-            st.session_state[key] = []
-        else:
-            st.session_state[key] = None
+        if key not in st.session_state:
+            st.session_state[key] = [] if key in ("cleansing_steps", "preprocessing_steps") else None
     # Streamlit automatically re-runs when session state changes; explicit rerun removed.
 
 
@@ -185,8 +189,29 @@ def main():
                     pass
 
         st.sidebar.markdown("---")
+        with st.sidebar.expander("Panduan Singkat"):
+            st.markdown(
+                f"""1. Upload train CSV di halaman Data.
+2. Pilih target column dan task type.
+3. Split dataset, lalu lakukan cleansing/preprocessing.
+4. Jalankan validation dan training.
+5. Upload test CSV di Submission.
+6. Download submission CSV.
+
+Batas study group: train {MAX_TRAIN_UPLOAD_MB} MB, test {MAX_TEST_UPLOAD_MB} MB,
+maksimal {MAX_ROWS:,} rows dan {MAX_COLUMNS} columns.
+"""
+            )
+
+        st.sidebar.markdown("---")
         if st.sidebar.button("Reset Data (clear)"):
             reset_data()
+        with st.sidebar.expander("Session diagnostics"):
+            diagnostics = session_diagnostics(st.session_state)
+            st.caption(f"Known keys: {diagnostics['known_keys_present']}")
+            st.caption(f"Total keys: {diagnostics['total_keys']}")
+            st.caption(f"Heavy keys: {diagnostics['heavy_keys_present']}")
+            st.caption(f"Evaluation plots: {diagnostics['evaluation_plots_count']}")
 
     page = st.session_state.get("page", "Landing")
 

@@ -5,3 +5,10 @@ venv
 
 analysis_output/
 reports/
+
+__pycache__/
+.pytest_cache/
+*.pkl
+*.joblib
+*.zip
+models/

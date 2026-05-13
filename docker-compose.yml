@@ -1,0 +1,13 @@
+services:
+  big-data-toolkit:
+    build: .
+    container_name: big-data-toolkit
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    mem_limit: 4g
+    cpus: "2.0"
+    environment:
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0

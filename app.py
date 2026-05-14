@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 import base64
 import io
+from datetime import datetime
 
 from input_data import render_input_data
 from eda import render_eda
@@ -19,6 +20,17 @@ from competition_page import render_competition_page, render_export_page
 from ui_components import render_info_panel
 from state_manager import clear_all_workflow_state, session_diagnostics
 from config_limits import MAX_COLUMNS, MAX_ROWS, MAX_TEST_UPLOAD_MB, MAX_TRAIN_UPLOAD_MB
+from session_persistence import (
+    SessionExpiredError,
+    SessionPersistenceError,
+    cleanup_expired_sessions,
+    clear_saved_session,
+    ensure_anonymous_session_id,
+    get_session_metadata,
+    load_workflow_state,
+    save_workflow_state,
+    sanitize_session_id,
+)
 
 SESSION_KEYS = [
     "df",
@@ -86,12 +98,81 @@ def reset_data():
     # Streamlit automatically re-runs when session state changes; explicit rerun removed.
 
 
+def _format_session_time(value):
+    if not value:
+        return "-"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return str(value)
+
+
+def render_session_recovery_sidebar():
+    session_id = st.session_state.get("anonymous_session_id")
+    try:
+        metadata = get_session_metadata(session_id) if session_id else None
+    except Exception:
+        metadata = None
+
+    with st.sidebar.expander("Temporary Session Recovery", expanded=False):
+        st.markdown(f"**Session ID Anda: `{session_id}`**")
+        st.caption(
+            "Simpan Session ID ini. Jika halaman refresh atau koneksi terputus, "
+            "masukkan Session ID yang sama lalu klik Load Progress."
+        )
+        st.caption(
+            "Progress disimpan sementara selama 2 jam sejak aktivitas terakhir. "
+            "Setelah itu, progress akan otomatis dihapus."
+        )
+        st.warning("Session ID bukan akun/login. Jangan bagikan Session ID ke peserta lain.")
+
+        if metadata:
+            st.caption(f"Last saved at: {_format_session_time(metadata.get('saved_at'))}")
+            st.caption(f"Expires at: {_format_session_time(metadata.get('expires_at'))}")
+        else:
+            st.caption("Last saved at: belum pernah disimpan")
+            st.caption("Expires after 2 hours of inactivity setelah progress disimpan.")
+
+        if st.button("Save Progress Now", key="session_save_now"):
+            try:
+                metadata = save_workflow_state(st.session_state, session_id)
+                st.success(f"Progress tersimpan untuk {metadata['session_id']}.")
+            except Exception as exc:
+                st.error(f"Gagal menyimpan progress: {exc}")
+
+        load_id = st.text_input("Load Progress", placeholder="BDT-XXXXXX", key="session_load_id")
+        if st.button("Load Progress", key="session_load_now"):
+            try:
+                safe_id = sanitize_session_id(load_id)
+                _loaded_state, metadata = load_workflow_state(st.session_state, safe_id)
+                st.success(f"Progress berhasil dimuat dari {metadata['session_id']}.")
+            except SessionExpiredError as exc:
+                st.error(str(exc))
+            except (SessionPersistenceError, ValueError) as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Gagal memuat progress: {exc}")
+
+        if st.button("Clear My Progress", key="session_clear_saved"):
+            try:
+                clear_saved_session(session_id)
+                st.success("Progress tersimpan untuk Session ID ini sudah dihapus.")
+            except Exception as exc:
+                st.error(f"Gagal menghapus progress: {exc}")
+
+
 
 
 
 def main():
     st.set_page_config(page_title="Big Data Toolkit", layout="wide")
     init_session_state()
+    ensure_anonymous_session_id(st.session_state)
+    try:
+        cleanup_expired_sessions()
+    except Exception:
+        pass
     # Respect URL query param `?page=...` for direct navigation (used by splash link)
     try:
         params = st.query_params
@@ -203,6 +284,8 @@ maksimal {MAX_ROWS:,} rows dan {MAX_COLUMNS} columns.
 """
             )
 
+        st.sidebar.markdown("---")
+        render_session_recovery_sidebar()
         st.sidebar.markdown("---")
         if st.sidebar.button("Reset Data (clear)"):
             reset_data()

@@ -11,6 +11,7 @@ Panduan ini membantu mentor/asisten lab menjalankan sesi study group Big Data To
 - Pastikan peserta tahu target column dan jenis task.
 - Jelaskan batas upload: train 10 MB, test 5 MB, maksimal 100.000 rows dan 200 columns.
 - Ingatkan bahwa upload model `.pkl` / `.joblib` dari peserta dinonaktifkan.
+- Minta peserta mencatat Session ID di sidebar sebelum mulai praktik.
 - Siapkan contoh jawaban untuk error umum: upload ditolak, one-hot ditolak, dan submission missing feature.
 
 ## Saat Sesi
@@ -22,6 +23,21 @@ Panduan ini membantu mentor/asisten lab menjalankan sesi study group Big Data To
 - Untuk classification, gunakan confusion matrix untuk menjelaskan jenis error.
 - Untuk regression, jelaskan MAE/RMSE sebagai ukuran besar error.
 - Sarankan peserta mencatat preprocessing dan model yang menghasilkan metric terbaik.
+- Setelah milestone penting, ingatkan peserta klik **Save Progress Now** di sidebar.
+
+## Temporary Session Recovery
+
+Gunakan bagian **Temporary Session Recovery** saat peserta mengalami refresh, reconnect, atau tab tertutup.
+
+Langkah bantu cepat:
+
+1. Minta peserta membuka sidebar.
+2. Minta peserta memasukkan Session ID lama, misalnya `BDT-8F2A9C`.
+3. Klik **Load Progress**.
+4. Jika berhasil, cek halaman Data/Split/Training untuk memastikan workflow kembali.
+5. Jika gagal karena kedaluwarsa, jelaskan bahwa progress sementara hanya berlaku 2 jam sejak aktivitas terakhir.
+
+Peringatan untuk mentor: Session ID bukan akun/login dan bukan auth. Jangan minta peserta membagikan Session ID di grup besar. Siapa pun yang mengetahui Session ID dapat mencoba memuat progress sementara selama TTL masih aktif.
 
 ## Common Issues
 
@@ -57,7 +73,8 @@ Cek target, missing value, imbalance, preprocessing, dan apakah peserta memilih 
 ## Batasan yang Perlu Dijelaskan
 
 - Aplikasi cocok untuk workshop/study group terkontrol, bukan public production.
-- Data dan model disimpan di session, bukan sistem persistent per user.
+- Data dan model disimpan di session browser dan bisa disimpan sementara lewat Session ID anonim.
+- Session ID bukan login/auth, tidak menyediakan isolasi privasi seperti akun sungguhan.
 - CV leakage belum sepenuhnya diselesaikan karena pipeline belum full sklearn Pipeline.
 - Feature engineering tertentu belum bisa direplay penuh saat submission.
 - Untuk tahap belajar, gunakan workflow sederhana dan hindari eksperimen yang terlalu berat.

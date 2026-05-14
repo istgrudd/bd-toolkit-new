@@ -16,6 +16,7 @@ Checklist singkat:
 - Cari tahu nama target column dari soal.
 - Jangan upload file model `.pkl` atau `.joblib`.
 - Pastikan nama kolom train dan test konsisten.
+- Catat Session ID yang muncul di sidebar, misalnya `BDT-8F2A9C`.
 
 ## 3. Format Dataset
 
@@ -153,10 +154,26 @@ Batasan untuk sesi study group:
 - Permutation importance nonaktif secara default.
 - Upload `.pkl` / `.joblib` dari user dinonaktifkan untuk keamanan.
 - Feature engineering tertentu mungkin belum bisa direplay saat Submission. Jika replay gagal, aplikasi akan menampilkan error dan prediction tidak dilanjutkan.
+- Progress sementara melalui Session ID kedaluwarsa setelah 2 jam sejak aktivitas terakhir.
 
 Batasan ini sengaja dipasang supaya aplikasi tetap stabil saat dipakai banyak peserta secara bersamaan.
 
-## 9. Troubleshooting
+## 9. Temporary Session Recovery
+
+Di sidebar ada bagian **Temporary Session Recovery**.
+
+Yang perlu kamu ingat:
+
+- "Session ID Anda: BDT-XXXXXX" adalah kode sementara untuk browser/session kamu.
+- Simpan Session ID ini. Jika halaman refresh atau koneksi terputus, masukkan Session ID yang sama lalu klik **Load Progress**.
+- Klik **Save Progress Now** setelah langkah penting, misalnya setelah confirm dataset, split, preprocessing, training, atau membuat submission.
+- Progress disimpan sementara selama 2 jam sejak aktivitas terakhir. Setelah itu, progress akan otomatis dihapus.
+- **Clear My Progress** menghapus progress tersimpan untuk Session ID kamu.
+- Session ID bukan akun/login. Jangan bagikan Session ID ke peserta lain.
+
+Catatan penting: siapa pun yang tahu Session ID dapat mencoba memuat progress sementara selama belum kedaluwarsa. Jangan simpan data rahasia di aplikasi workshop ini.
+
+## 10. Troubleshooting
 
 ### File saya gagal di-upload
 
@@ -186,7 +203,11 @@ Kolom test tidak sesuai dengan fitur saat training. Pastikan nama kolom test sam
 
 Beberapa feature engineering belum bisa direplay otomatis saat submission. Jika ini terjadi, gunakan fitur asli yang sudah ada di test CSV atau ulang workflow dengan preprocessing yang bisa direplay.
 
-## 10. Rekomendasi Workflow untuk Penugasan
+### Halaman refresh dan progress hilang
+
+Buka bagian **Temporary Session Recovery** di sidebar, masukkan Session ID yang kamu catat, lalu klik **Load Progress**. Jika belum pernah klik **Save Progress Now** atau sudah lebih dari 2 jam sejak aktivitas terakhir, progress mungkin tidak bisa dipulihkan.
+
+## 11. Rekomendasi Workflow untuk Penugasan
 
 Workflow sederhana yang aman untuk mulai:
 

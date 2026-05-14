@@ -40,6 +40,18 @@ Big Data Toolkit 2 adalah aplikasi Streamlit untuk workflow end-to-end machine l
 - Permutation importance nonaktif secara default
 - Upload model `.pkl` / `.joblib` dari user dinonaktifkan untuk keamanan
 
+## Temporary Session Recovery
+
+Aplikasi menampilkan Session ID anonim di sidebar, misalnya `BDT-8F2A9C`.
+Gunakan tombol **Save Progress Now** untuk menyimpan progress sementara.
+Jika halaman refresh atau koneksi terputus, masukkan Session ID yang sama di
+sidebar lalu klik **Load Progress**.
+
+Progress tersimpan di server selama 2 jam sejak aktivitas terakhir pada Session
+ID tersebut, lalu otomatis kedaluwarsa dan dibersihkan. Session ID bukan
+akun/login dan tidak memberi proteksi privasi; siapa pun yang mengetahui
+Session ID dapat mencoba memuat progress sementara selama belum kedaluwarsa.
+
 ## Untuk Peserta
 
 Lihat panduan lengkap di [docs/PANDUAN_PESERTA.md](docs/PANDUAN_PESERTA.md).

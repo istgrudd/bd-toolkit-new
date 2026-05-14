@@ -5,6 +5,7 @@ venv
 
 analysis_output/
 reports/
+sessions/
 
 __pycache__/
 .pytest_cache/
